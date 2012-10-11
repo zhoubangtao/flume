@@ -22,6 +22,7 @@ public interface ChannelFactory {
 
   public Channel create(String name, String type) throws FlumeException;
 
-  public boolean unregister(Channel channel);
+  public Class<? extends Channel> getChannelClass(String type)
+  throws FlumeException;
 
 }

@@ -19,14 +19,12 @@ package org.apache.flume.conf;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
-import java.util.Enumeration;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
-import java.util.Properties;
 import java.util.Set;
 import java.util.StringTokenizer;
 
@@ -70,14 +68,12 @@ public class FlumeConfiguration {
   /**
    * Creates a populated Flume Configuration object.
    */
-  public FlumeConfiguration(Properties properties) {
+  public FlumeConfiguration(Map<String, String> properties) {
     agentConfigMap = new HashMap<String, AgentConfiguration>();
     errors = new LinkedList<FlumeConfigurationError>();
     // Construct the in-memory component hierarchy
-    Enumeration<?> propertyNames = properties.propertyNames();
-    while (propertyNames.hasMoreElements()) {
-      String name = (String) propertyNames.nextElement();
-      String value = properties.getProperty(name);
+    for(String name : properties.keySet()) {
+      String value = properties.get(name);
 
       if (!addRawProperty(name, value)) {
         logger.warn("Configuration property ignored: " + name + " = " + value);

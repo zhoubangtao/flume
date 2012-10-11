@@ -25,5 +25,4 @@ public interface SourceFactory {
   public Source create(String sourceName, String type)
       throws FlumeException;
 
-  public boolean unregister(Source source);
 }

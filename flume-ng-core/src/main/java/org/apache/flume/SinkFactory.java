@@ -25,6 +25,4 @@ public interface SinkFactory {
   public Sink create(String name, String type)
       throws FlumeException;
 
-  public boolean unregister(Sink sink);
-
 }
