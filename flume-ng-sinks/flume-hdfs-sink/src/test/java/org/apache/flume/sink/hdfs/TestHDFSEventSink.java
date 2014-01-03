@@ -23,19 +23,24 @@ import java.io.IOException;
 import java.io.InputStreamReader;
 import java.nio.ByteBuffer;
 import java.nio.charset.CharsetDecoder;
+import java.util.Arrays;
 import java.util.Calendar;
 import java.util.List;
+import java.util.UUID;
 
 import org.apache.avro.file.DataFileStream;
 import org.apache.avro.generic.GenericData;
 import org.apache.avro.generic.GenericDatumReader;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.avro.io.DatumReader;
+import org.apache.commons.lang.StringUtils;
 import org.apache.flume.Channel;
+import org.apache.flume.Clock;
 import org.apache.flume.Context;
 import org.apache.flume.Event;
 import org.apache.flume.EventDeliveryException;
 import org.apache.flume.Sink.Status;
+import org.apache.flume.SystemClock;
 import org.apache.flume.Transaction;
 import org.apache.flume.channel.MemoryChannel;
 import org.apache.flume.conf.Configurables;
@@ -75,7 +80,9 @@ public class TestHDFSEventSink {
     try {
       FileSystem fs = FileSystem.get(conf);
       Path dirPath = new Path(testPath);
-      fs.delete(dirPath, true);
+      if (fs.exists(dirPath)) {
+        fs.delete(dirPath, true);
+      }
     } catch (IOException eIO) {
       LOG.warn("IO Error in test cleanup", eIO);
     }
@@ -96,6 +103,7 @@ public class TestHDFSEventSink {
         + Thread.currentThread().getId();
 
     sink = new HDFSEventSink();
+    sink.setName("HDFSEventSink-" + UUID.randomUUID().toString());
     dirCleanup();
   }
 
@@ -105,13 +113,20 @@ public class TestHDFSEventSink {
       dirCleanup();
   }
 
+  @Test
+  public void testTextBatchAppend() throws Exception {
+    doTestTextBatchAppend(false);
+  }
 
   @Test
-  public void testTextBatchAppend() throws InterruptedException, LifecycleException,
-      EventDeliveryException, IOException {
+  public void testTextBatchAppendRawFS() throws Exception {
+    doTestTextBatchAppend(true);
+  }
+
+  public void doTestTextBatchAppend(boolean useRawLocalFileSystem)
+      throws Exception {
     LOG.debug("Starting...");
 
-    final long txnMax = 2;
     final long rollCount = 10;
     final long batchSize = 2;
     final String fileName = "FlumeData";
@@ -131,12 +146,13 @@ public class TestHDFSEventSink {
     // context.put("hdfs.path", testPath + "/%Y-%m-%d/%H");
     context.put("hdfs.path", newPath);
     context.put("hdfs.filePrefix", fileName);
-    context.put("hdfs.txnEventMax", String.valueOf(txnMax));
     context.put("hdfs.rollCount", String.valueOf(rollCount));
     context.put("hdfs.rollInterval", "0");
     context.put("hdfs.rollSize", "0");
     context.put("hdfs.batchSize", String.valueOf(batchSize));
     context.put("hdfs.writeFormat", "Text");
+    context.put("hdfs.useRawLocalFileSystem",
+        Boolean.toString(useRawLocalFileSystem));
     context.put("hdfs.fileType", "DataStream");
 
     Configurables.configure(sink, context);
@@ -151,10 +167,10 @@ public class TestHDFSEventSink {
     List<String> bodies = Lists.newArrayList();
 
     // push the event batches into channel to roll twice
-    for (i = 1; i <= rollCount*2/txnMax; i++) {
+    for (i = 1; i <= (rollCount*10)/batchSize; i++) {
       Transaction txn = channel.getTransaction();
       txn.begin();
-      for (j = 1; j <= txnMax; j++) {
+      for (j = 1; j <= batchSize; j++) {
         Event event = new SimpleEvent();
         eventDate.clear();
         eventDate.set(2011, i, i, i, 0); // yy mm dd
@@ -178,7 +194,10 @@ public class TestHDFSEventSink {
     Path fList[] = FileUtil.stat2Paths(dirStat);
 
     // check that the roll happened correctly for the given data
-    Assert.assertEquals("num files", totalEvents / rollCount, fList.length);
+    long expectedFiles = totalEvents / rollCount;
+    if (totalEvents % rollCount > 0) expectedFiles++;
+    Assert.assertEquals("num files wrong, found: " +
+        Lists.newArrayList(fList), expectedFiles, fList.length);
     // check the contents of the all files
     verifyOutputTextFiles(fs, conf, dirPath.toUri().getPath(), fileName, bodies);
   }
@@ -217,12 +236,11 @@ public class TestHDFSEventSink {
     Assert.assertEquals(Status.BACKOFF, sink.process());
     sink.stop();
   }
-  
+
   @Test
   public void testKerbFileAccess() throws InterruptedException,
       LifecycleException, EventDeliveryException, IOException {
     LOG.debug("Starting testKerbFileAccess() ...");
-    final long txnMax = 25;
     final String fileName = "FlumeData";
     final long rollCount = 5;
     final long batchSize = 2;
@@ -239,11 +257,10 @@ public class TestHDFSEventSink {
     Context context = new Context();
     context.put("hdfs.path", newPath);
     context.put("hdfs.filePrefix", fileName);
-    context.put("hdfs.txnEventMax", String.valueOf(txnMax));
     context.put("hdfs.rollCount", String.valueOf(rollCount));
     context.put("hdfs.batchSize", String.valueOf(batchSize));
     context.put("hdfs.kerberosPrincipal", kerbConfPrincipal);
-    context.put("hdfs.kerberosKeytab", kerbKeytab);    
+    context.put("hdfs.kerberosKeytab", kerbKeytab);
 
     try {
       Configurables.configure(sink, context);
@@ -258,13 +275,12 @@ public class TestHDFSEventSink {
       UserGroupInformation.setConfiguration(conf);
     }
   }
-  
+
   @Test
   public void testTextAppend() throws InterruptedException, LifecycleException,
       EventDeliveryException, IOException {
 
     LOG.debug("Starting...");
-    final long txnMax = 25;
     final long rollCount = 3;
     final long batchSize = 2;
     final String fileName = "FlumeData";
@@ -284,7 +300,6 @@ public class TestHDFSEventSink {
     // context.put("hdfs.path", testPath + "/%Y-%m-%d/%H");
     context.put("hdfs.path", newPath);
     context.put("hdfs.filePrefix", fileName);
-    context.put("hdfs.txnEventMax", String.valueOf(txnMax));
     context.put("hdfs.rollCount", String.valueOf(rollCount));
     context.put("hdfs.batchSize", String.valueOf(batchSize));
     context.put("hdfs.writeFormat", "Text");
@@ -305,7 +320,7 @@ public class TestHDFSEventSink {
     for (i = 1; i < 4; i++) {
       Transaction txn = channel.getTransaction();
       txn.begin();
-      for (j = 1; j <= txnMax; j++) {
+      for (j = 1; j <= batchSize; j++) {
         Event event = new SimpleEvent();
         eventDate.clear();
         eventDate.set(2011, i, i, i, 0); // yy mm dd
@@ -332,7 +347,10 @@ public class TestHDFSEventSink {
     Path fList[] = FileUtil.stat2Paths(dirStat);
 
     // check that the roll happened correctly for the given data
-    Assert.assertEquals("num files", totalEvents / rollCount, fList.length);
+    long expectedFiles = totalEvents / rollCount;
+    if (totalEvents % rollCount > 0) expectedFiles++;
+    Assert.assertEquals("num files wrong, found: " +
+        Lists.newArrayList(fList), expectedFiles, fList.length);
     verifyOutputTextFiles(fs, conf, dirPath.toUri().getPath(), fileName, bodies);
   }
 
@@ -341,7 +359,6 @@ public class TestHDFSEventSink {
       EventDeliveryException, IOException {
 
     LOG.debug("Starting...");
-    final long txnMax = 25;
     final long rollCount = 3;
     final long batchSize = 2;
     final String fileName = "FlumeData";
@@ -361,7 +378,6 @@ public class TestHDFSEventSink {
     // context.put("hdfs.path", testPath + "/%Y-%m-%d/%H");
     context.put("hdfs.path", newPath);
     context.put("hdfs.filePrefix", fileName);
-    context.put("hdfs.txnEventMax", String.valueOf(txnMax));
     context.put("hdfs.rollCount", String.valueOf(rollCount));
     context.put("hdfs.batchSize", String.valueOf(batchSize));
     context.put("hdfs.writeFormat", "Text");
@@ -383,7 +399,7 @@ public class TestHDFSEventSink {
     for (i = 1; i < 4; i++) {
       Transaction txn = channel.getTransaction();
       txn.begin();
-      for (j = 1; j <= txnMax; j++) {
+      for (j = 1; j <= batchSize; j++) {
         Event event = new SimpleEvent();
         eventDate.clear();
         eventDate.set(2011, i, i, i, 0); // yy mm dd
@@ -410,7 +426,10 @@ public class TestHDFSEventSink {
     Path fList[] = FileUtil.stat2Paths(dirStat);
 
     // check that the roll happened correctly for the given data
-    Assert.assertEquals("num files", totalEvents / rollCount, fList.length);
+    long expectedFiles = totalEvents / rollCount;
+    if (totalEvents % rollCount > 0) expectedFiles++;
+    Assert.assertEquals("num files wrong, found: " +
+        Lists.newArrayList(fList), expectedFiles, fList.length);
     verifyOutputAvroFiles(fs, conf, dirPath.toUri().getPath(), fileName, bodies);
   }
 
@@ -419,7 +438,6 @@ public class TestHDFSEventSink {
       LifecycleException, EventDeliveryException, IOException {
 
     LOG.debug("Starting...");
-    final long txnMax = 25;
     final String fileName = "FlumeData";
     final long rollCount = 5;
     final long batchSize = 2;
@@ -439,7 +457,6 @@ public class TestHDFSEventSink {
 
     context.put("hdfs.path", newPath);
     context.put("hdfs.filePrefix", fileName);
-    context.put("hdfs.txnEventMax", String.valueOf(txnMax));
     context.put("hdfs.rollCount", String.valueOf(rollCount));
     context.put("hdfs.batchSize", String.valueOf(batchSize));
 
@@ -458,7 +475,7 @@ public class TestHDFSEventSink {
     for (i = 1; i < numBatches; i++) {
       Transaction txn = channel.getTransaction();
       txn.begin();
-      for (j = 1; j <= txnMax; j++) {
+      for (j = 1; j <= batchSize; j++) {
         Event event = new SimpleEvent();
         eventDate.clear();
         eventDate.set(2011, i, i, i, 0); // yy mm dd
@@ -485,8 +502,100 @@ public class TestHDFSEventSink {
     Path fList[] = FileUtil.stat2Paths(dirStat);
 
     // check that the roll happened correctly for the given data
-    Assert.assertEquals("num files", totalEvents / rollCount, fList.length);
+    long expectedFiles = totalEvents / rollCount;
+    if (totalEvents % rollCount > 0) expectedFiles++;
+    Assert.assertEquals("num files wrong, found: " +
+        Lists.newArrayList(fList), expectedFiles, fList.length);
     verifyOutputSequenceFiles(fs, conf, dirPath.toUri().getPath(), fileName, bodies);
+  }
+
+  @Test
+  public void testSimpleAppendLocalTime() throws InterruptedException,
+    LifecycleException, EventDeliveryException, IOException {
+    final long currentTime = System.currentTimeMillis();
+    Clock clk = new Clock() {
+      @Override
+      public long currentTimeMillis() {
+        return currentTime;
+      }
+    };
+
+    LOG.debug("Starting...");
+    final String fileName = "FlumeData";
+    final long rollCount = 5;
+    final long batchSize = 2;
+    final int numBatches = 4;
+    String newPath = testPath + "/singleBucket/%s" ;
+    String expectedPath = testPath + "/singleBucket/" +
+      String.valueOf(currentTime/1000);
+    int totalEvents = 0;
+    int i = 1, j = 1;
+
+    // clear the test directory
+    Configuration conf = new Configuration();
+    FileSystem fs = FileSystem.get(conf);
+    Path dirPath = new Path(expectedPath);
+    fs.delete(dirPath, true);
+    fs.mkdirs(dirPath);
+
+    Context context = new Context();
+
+    context.put("hdfs.path", newPath);
+    context.put("hdfs.filePrefix", fileName);
+    context.put("hdfs.rollCount", String.valueOf(rollCount));
+    context.put("hdfs.batchSize", String.valueOf(batchSize));
+    context.put("hdfs.useLocalTimeStamp", String.valueOf(true));
+
+    Configurables.configure(sink, context);
+
+    Channel channel = new MemoryChannel();
+    Configurables.configure(channel, context);
+
+    sink.setChannel(channel);
+    sink.setBucketClock(clk);
+    sink.start();
+
+    Calendar eventDate = Calendar.getInstance();
+    List<String> bodies = Lists.newArrayList();
+
+    // push the event batches into channel
+    for (i = 1; i < numBatches; i++) {
+      Transaction txn = channel.getTransaction();
+      txn.begin();
+      for (j = 1; j <= batchSize; j++) {
+        Event event = new SimpleEvent();
+        eventDate.clear();
+        eventDate.set(2011, i, i, i, 0); // yy mm dd
+        event.getHeaders().put("timestamp",
+          String.valueOf(eventDate.getTimeInMillis()));
+        event.getHeaders().put("hostname", "Host" + i);
+        String body = "Test." + i + "." + j;
+        event.setBody(body.getBytes());
+        bodies.add(body);
+        channel.put(event);
+        totalEvents++;
+      }
+      txn.commit();
+      txn.close();
+
+      // execute sink to process the events
+      sink.process();
+    }
+
+    sink.stop();
+
+    // loop through all the files generated and check their contains
+    FileStatus[] dirStat = fs.listStatus(dirPath);
+    Path fList[] = FileUtil.stat2Paths(dirStat);
+
+    // check that the roll happened correctly for the given data
+    long expectedFiles = totalEvents / rollCount;
+    if (totalEvents % rollCount > 0) expectedFiles++;
+    Assert.assertEquals("num files wrong, found: " +
+      Lists.newArrayList(fList), expectedFiles, fList.length);
+    verifyOutputSequenceFiles(fs, conf, dirPath.toUri().getPath(), fileName, bodies);
+    // The clock in bucketpath is static, so restore the real clock
+    sink.setBucketClock(new SystemClock());
   }
 
   @Test
@@ -494,7 +603,6 @@ public class TestHDFSEventSink {
       EventDeliveryException, IOException {
 
     LOG.debug("Starting...");
-    final long txnMax = 25;
     final long rollCount = 3;
     final long batchSize = 2;
     final String fileName = "FlumeData";
@@ -509,8 +617,8 @@ public class TestHDFSEventSink {
     Context context = new Context();
 
     context.put("hdfs.path", testPath + "/%Y-%m-%d/%H");
+    context.put("hdfs.timeZone", "UTC");
     context.put("hdfs.filePrefix", fileName);
-    context.put("hdfs.txnEventMax", String.valueOf(txnMax));
     context.put("hdfs.rollCount", String.valueOf(rollCount));
     context.put("hdfs.batchSize", String.valueOf(batchSize));
 
@@ -528,7 +636,7 @@ public class TestHDFSEventSink {
     for (int i = 1; i < 4; i++) {
       Transaction txn = channel.getTransaction();
       txn.begin();
-      for (int j = 1; j <= txnMax; j++) {
+      for (int j = 1; j <= batchSize; j++) {
         Event event = new SimpleEvent();
         eventDate.clear();
         eventDate.set(2011, i, i, i, 0); // yy mm dd
@@ -557,7 +665,6 @@ public class TestHDFSEventSink {
       LifecycleException, EventDeliveryException, IOException {
 
     LOG.debug("Starting...");
-    final long txnMax = 25;
     final String fileName = "FlumeData";
     final long rollCount = 5;
     final long batchSize = 2;
@@ -580,7 +687,6 @@ public class TestHDFSEventSink {
 
     context.put("hdfs.path", newPath);
     context.put("hdfs.filePrefix", fileName);
-    context.put("hdfs.txnEventMax", String.valueOf(txnMax));
     context.put("hdfs.rollCount", String.valueOf(rollCount));
     context.put("hdfs.batchSize", String.valueOf(batchSize));
     context.put("hdfs.fileType", HDFSBadWriterFactory.BadSequenceFileType);
@@ -600,7 +706,7 @@ public class TestHDFSEventSink {
     for (i = 1; i < numBatches; i++) {
       Transaction txn = channel.getTransaction();
       txn.begin();
-      for (j = 1; j <= txnMax; j++) {
+      for (j = 1; j <= batchSize; j++) {
         Event event = new SimpleEvent();
         eventDate.clear();
         eventDate.set(2011, i, i, i, 0); // yy mm dd
@@ -740,7 +846,6 @@ public class TestHDFSEventSink {
 
     LOG.debug("Starting...");
     final int numBatches = 4;
-    final long txnMax = 25;
     final String fileName = "FlumeData";
     final long rollCount = 5;
     final long batchSize = 2;
@@ -761,7 +866,6 @@ public class TestHDFSEventSink {
 
     context.put("hdfs.path", newPath);
     context.put("hdfs.filePrefix", fileName);
-    context.put("hdfs.txnEventMax", String.valueOf(txnMax));
     context.put("hdfs.rollCount", String.valueOf(rollCount));
     context.put("hdfs.batchSize", String.valueOf(batchSize));
     context.put("hdfs.fileType", HDFSBadWriterFactory.BadSequenceFileType);
@@ -780,7 +884,7 @@ public class TestHDFSEventSink {
     for (i = 1; i < numBatches; i++) {
       channel.getTransaction().begin();
       try {
-        for (j = 1; j <= txnMax; j++) {
+        for (j = 1; j <= batchSize; j++) {
           Event event = new SimpleEvent();
           eventDate.clear();
           eventDate.set(2011, i, i, i, 0); // yy mm dd
@@ -815,7 +919,6 @@ public class TestHDFSEventSink {
       LifecycleException, EventDeliveryException, IOException {
 
     LOG.debug("Starting...");
-    final long txnMax = 2;
     final String fileName = "FlumeData";
     final long rollCount = 5;
     final long batchSize = 2;
@@ -837,7 +940,6 @@ public class TestHDFSEventSink {
     Context context = new Context();
     context.put("hdfs.path", newPath);
     context.put("hdfs.filePrefix", fileName);
-    context.put("hdfs.txnEventMax", String.valueOf(txnMax));
     context.put("hdfs.rollCount", String.valueOf(rollCount));
     context.put("hdfs.batchSize", String.valueOf(batchSize));
     context.put("hdfs.fileType", HDFSBadWriterFactory.BadSequenceFileType);
@@ -856,7 +958,7 @@ public class TestHDFSEventSink {
     for (i = 0; i < numBatches; i++) {
       Transaction txn = channel.getTransaction();
       txn.begin();
-      for (j = 1; j <= txnMax; j++) {
+      for (j = 1; j <= batchSize; j++) {
         Event event = new SimpleEvent();
         eventDate.clear();
         eventDate.set(2011, i, i, i, 0); // yy mm dd
@@ -886,7 +988,6 @@ public class TestHDFSEventSink {
    */
   private void slowAppendTestHelper (long appendTimeout)  throws InterruptedException, IOException,
   LifecycleException, EventDeliveryException, IOException {
-    final long txnMax = 2;
     final String fileName = "FlumeData";
     final long rollCount = 5;
     final long batchSize = 2;
@@ -909,7 +1010,6 @@ public class TestHDFSEventSink {
     Context context = new Context();
     context.put("hdfs.path", newPath);
     context.put("hdfs.filePrefix", fileName);
-    context.put("hdfs.txnEventMax", String.valueOf(txnMax));
     context.put("hdfs.rollCount", String.valueOf(rollCount));
     context.put("hdfs.batchSize", String.valueOf(batchSize));
     context.put("hdfs.fileType", HDFSBadWriterFactory.BadSequenceFileType);
@@ -928,7 +1028,7 @@ public class TestHDFSEventSink {
     for (i = 0; i < numBatches; i++) {
       Transaction txn = channel.getTransaction();
       txn.begin();
-      for (j = 1; j <= txnMax; j++) {
+      for (j = 1; j <= batchSize; j++) {
         Event event = new SimpleEvent();
         eventDate.clear();
         eventDate.set(2011, i, i, i, 0); // yy mm dd
@@ -957,8 +1057,10 @@ public class TestHDFSEventSink {
 
     // check that the roll happened correctly for the given data
     // Note that we'll end up with two files with only a head
-    Assert.assertEquals((totalEvents / rollCount) +1 , fList.length);
-
+    long expectedFiles = totalEvents / rollCount;
+    if (totalEvents % rollCount > 0) expectedFiles++;
+    Assert.assertEquals("num files wrong, found: " +
+        Lists.newArrayList(fList), expectedFiles, fList.length);
     verifyOutputSequenceFiles(fs, conf, dirPath.toUri().getPath(), fileName, bodies);
   }
 
@@ -982,5 +1084,65 @@ public class TestHDFSEventSink {
       LifecycleException, EventDeliveryException, IOException {
     LOG.debug("Starting...");
     slowAppendTestHelper(0);
+  }
+  @Test
+  public void testCloseOnIdle() throws IOException, EventDeliveryException, InterruptedException {
+    String hdfsPath = testPath + "/idleClose";
+
+    Configuration conf = new Configuration();
+    FileSystem fs = FileSystem.get(conf);
+    Path dirPath = new Path(hdfsPath);
+    fs.delete(dirPath, true);
+    fs.mkdirs(dirPath);
+    Context context = new Context();
+    context.put("hdfs.path", hdfsPath);
+    /*
+     * All three rolling methods are disabled so the only
+     * way a file can roll is through the idle timeout.
+     */
+    context.put("hdfs.rollCount", "0");
+    context.put("hdfs.rollSize", "0");
+    context.put("hdfs.rollInterval", "0");
+    context.put("hdfs.batchSize", "2");
+    context.put("hdfs.idleTimeout", "1");
+    Configurables.configure(sink, context);
+
+    Channel channel = new MemoryChannel();
+    Configurables.configure(channel, context);
+
+    sink.setChannel(channel);
+    sink.start();
+
+    Transaction txn = channel.getTransaction();
+    txn.begin();
+    for(int i=0; i < 10; i++) {
+      Event event = new SimpleEvent();
+      event.setBody(("test event " + i).getBytes());
+      channel.put(event);
+    }
+    txn.commit();
+    txn.close();
+
+    sink.process();
+    sink.process();
+    Thread.sleep(1001);
+    // previous file should have timed out now
+    // this can throw an IOException(from the bucketWriter having idleClosed)
+    // this is not an issue as the sink will retry and get a fresh bucketWriter
+    // so long as the onIdleClose handler properly removes bucket writers that
+    // were closed due to idling
+    sink.process();
+    sink.process();
+    Thread.sleep(500); // shouldn't be enough for a timeout to occur
+    sink.process();
+    sink.process();
+    sink.stop();
+    FileStatus[] dirStat = fs.listStatus(dirPath);
+    Path[] fList = FileUtil.stat2Paths(dirStat);
+    Assert.assertEquals("Incorrect content of the directory " + StringUtils.join(fList, ","),
+      2, fList.length);
+    Assert.assertTrue(!fList[0].getName().endsWith(".tmp") &&
+      !fList[1].getName().endsWith(".tmp"));
+    fs.close();
   }
 }
